@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harmony4D Stand</title>
+<style>
+  :root { --bg:#0e1322; --panel:#151b2d; --line:#26304a; --text:#e5e9fb; --muted:#8a94b0;
+          --accent:#8ccaff; --contact:#ff7a7a22; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 system-ui, sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); }
+  h1 { margin:0 0 6px; font-size:17px; }
+  table { border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { padding:3px 10px; border-bottom:1px solid var(--line); text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  .layout { display:grid; grid-template-columns:290px 1fr; height:calc(100vh - 170px); }
+  aside { border-right:1px solid var(--line); overflow:auto; }
+  aside input { width:calc(100% - 16px); margin:8px; padding:6px; background:var(--panel);
+                color:var(--text); border:1px solid var(--line); border-radius:4px; }
+  .item { padding:6px 10px; cursor:pointer; border-bottom:1px solid var(--line); font-size:13px; }
+  .item:hover, .item.active { background:var(--panel); }
+  .item small { color:var(--muted); display:block; }
+  main { overflow:auto; padding:12px 16px; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px; }
+  video { width:100%; border-radius:6px; background:#000; }
+  .stage { background:var(--panel); border-radius:6px; position:relative; }
+  .stage canvas { width:100%; height:100%; display:block; cursor:grab; }
+  .legend { position:absolute; left:8px; top:6px; font-size:12px; color:var(--muted); }
+  .panel { background:var(--panel); border-radius:6px; padding:10px; margin-top:12px; }
+  .panel h3 { margin:0 0 6px; font-size:14px; }
+  .controls { display:flex; gap:12px; align-items:center; margin-top:8px; font-size:13px; }
+  .muted { color:var(--muted); }
+  button { background:var(--panel); color:var(--text); border:1px solid var(--line);
+           padding:3px 10px; border-radius:4px; cursor:pointer; }
+  button.on { border-color:var(--accent); color:var(--accent); }
+  svg text { fill:var(--muted); font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Motion fingerprinting from video · CoMotion under contact (Harmony4D test, two people)</h1>
+  <div id="summary" class="muted">Loading summary…</div>
+</header>
+<div class="layout">
+  <aside><input id="filter" placeholder="Filter views (e.g. grappling, cam06)"><div id="views"></div></aside>
+  <main>
+    <div id="title" class="muted">Pick a view on the left (sorted by limb error, worst first).</div>
+    <div class="row">
+      <div><video id="video" controls muted playsinline></video></div>
+      <div class="stage" id="stage"><canvas id="canvas"></canvas>
+        <div class="legend">thin white: multi-view fit · colour: CoMotion, aligned per person · drag to rotate</div></div>
+    </div>
+    <div class="controls" id="readout"></div>
+    <div class="panel"><h3>CoMotion error by body part, Procrustes-aligned (cm) · red band: people closer than 5 cm</h3>
+      <div id="who"></div><svg id="chart" width="100%" height="190"></svg></div>
+  </main>
+</div>
+<script>
+const PARTS = {torso:'#e5e9fb', left_arm:'#ffbc8a', right_arm:'#8ccaff', left_leg:'#f3a6d8', right_leg:'#a6f3c2'};
+const PARENT = [-1,0,0,0,1,2,3,4,5,6,7,8,9,9,9,12,13,14,16,17,18,19,20,21];
+const PART_OF = {}; Object.entries({torso:[0,3,6,9,12,15], left_arm:[13,16,18,20,22], right_arm:[14,17,19,21,23],
+  left_leg:[1,4,7,10], right_leg:[2,5,8,11]}).forEach(([p, ids]) => ids.forEach(j => PART_OF[j] = p));
+const PERSON_TINT = [1, 0.6];
+let views = [], data = null, current = null, person = null, yaw = 0.6, bounds = null;
+const $ = id => document.getElementById(id);
+const cm = v => v == null ? '–' : (v * 100).toFixed(1);
+async function json(url) { const r = await fetch(url); if (!r.ok) throw new Error(url); return r.json(); }
+
+async function init() {
+  const s = await json('/api/summary');
+  const parts = Object.entries(s.error_by_part).map(([k, v]) => `<td>${cm(v)}</td>`).join('');
+  const bins = s.by_closeness.map(b => `<td>${cm(b.error)}</td>`).join('');
+  $('summary').innerHTML = `<table><tr><th>${s.views} views</th>` +
+    Object.keys(s.error_by_part).map(k => `<th>${k}</th>`).join('') + `<th>missed</th></tr>` +
+    `<tr><td>CoMotion PA error, cm</td>${parts}<td>${(s.missed_rate * 100).toFixed(2)}%</td></tr></table>` +
+    `<div>error by closest distance between people: ` + s.by_closeness.map(b =>
+      `${b.closest_m[1] == null ? '>' + b.closest_m[0] * 100 : (b.closest_m[0] * 100) + '–' + (b.closest_m[1] * 100)} cm: <b>${cm(b.error)}</b>`).join(' · ') + `</div>`;
+  views = await json('/api/views');
+  renderList();
+}
+
+function renderList() {
+  const q = $('filter').value.toLowerCase();
+  $('views').innerHTML = views.filter(v => v.view.toLowerCase().includes(q)).map(v =>
+    `<div class="item ${current === v.view ? 'active' : ''}" data-view="${v.view}">${v.view.split('__').slice(1).join(' · ')}` +
+    `<small>${v.activity} · limbs ${cm(v.limb_error)} cm · contact ${(v.contact_share * 100).toFixed(0)}% of frames</small></div>`).join('');
+  for (const el of document.querySelectorAll('.item')) el.onclick = () => select(el.dataset.view);
+}
+
+async function select(view) {
+  current = view; renderList();
+  $('title').textContent = `${view} · loading poses…`;
+  const video = $('video'); video.src = `/video/${view}.mp4`;
+  data = await json(`/api/view/${view}`);
+  $('title').textContent = view;
+  const names = Object.keys(data.people); person = names[0];
+  const all = names.flatMap(n => data.people[n].gt.flat());
+  bounds = [0, 1, 2].map(a => { const v = all.map(p => p[a]); return [Math.min(...v), Math.max(...v)]; });
+  $('who').innerHTML = names.map(n => `<button data-n="${n}">${n}</button>`).join(' ');
+  for (const b of document.querySelectorAll('#who button')) b.onclick = () => { person = b.dataset.n; drawChart(); };
+  drawChart(); draw();
+}
+
+function frameAt(t) {
+  if (!data) return -1;
+  const k = Math.round(t * data.fps), f = data.frames;
+  let lo = 0, hi = f.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (f[m] < k) lo = m + 1; else hi = m; }
+  return lo;
+}
+
+function draw() {
+  const canvas = $('canvas'), stage = $('stage');
+  const w = stage.clientWidth, h = Math.max(260, $('video').clientHeight || 300);
+  stage.style.height = h + 'px';
+  canvas.width = w * devicePixelRatio; canvas.height = h * devicePixelRatio;
+  const ctx = canvas.getContext('2d'); ctx.scale(devicePixelRatio, devicePixelRatio); ctx.clearRect(0, 0, w, h);
+  if (!data) return;
+  const i = frameAt($('video').currentTime);
+  const cx = (bounds[0][0] + bounds[0][1]) / 2, cz = (bounds[2][0] + bounds[2][1]) / 2;
+  const span = Math.max(bounds[0][1] - bounds[0][0], bounds[1][1] - bounds[1][0], bounds[2][1] - bounds[2][0]);
+  const s = Math.min(w, h) * 0.85 / span, c = Math.cos(yaw), sn = Math.sin(yaw);
+  const proj = p => { const x = p[0] - cx, z = p[2] - cz;
+    return [w / 2 + (x * c - z * sn) * s, h - 20 - (p[1] - bounds[1][0]) * s]; };
+  const bones = (pose, style) => { for (let j = 1; j < 24; j++) {
+    const a = proj(pose[j]), b = proj(pose[PARENT[j]]); ctx.strokeStyle = style(j);
+    ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke(); } };
+  const lines = [];
+  Object.entries(data.people).forEach(([n, d], idx) => {
+    ctx.globalAlpha = 1; ctx.lineWidth = 1.2; bones(d.gt[i], () => '#ffffffaa');
+    if (d.est[i]) { ctx.globalAlpha = PERSON_TINT[idx]; ctx.lineWidth = 3; bones(d.est[i], j => PARTS[PART_OF[j]]); }
+    const e = Object.fromEntries(Object.keys(PARTS).map(p => [p, d.error[p][i]]));
+    lines.push(`<b>${n}</b> ` + (d.est[i] ? Object.entries(e).map(([p, v]) =>
+      `<span style="color:${PARTS[p]}">${p} ${cm(v)}</span>`).join(' ') : '<span class="muted">missed</span>'));
+  });
+  ctx.globalAlpha = 1;
+  $('readout').innerHTML = `frame ${data.frames[i]} · people ${(data.closeness[i] * 100).toFixed(0)} cm apart · ` + lines.join(' · ');
+  movePlayhead(i);
+}
+
+function drawChart() {
+  const svg = $('chart'); svg.innerHTML = '';
+  for (const b of document.querySelectorAll('#who button')) b.classList.toggle('on', b.dataset.n === person);
+  if (!data) return;
+  const d = data.people[person], n = data.frames.length;
+  const w = svg.clientWidth || 800, h = 190, pad = 30;
+  const vals = Object.values(d.error).flat().filter(v => v != null);
+  const max = Math.max(0.1, ...vals);
+  const x = i => pad + i / Math.max(1, n - 1) * (w - pad - 10);
+  const y = v => h - 18 - v / max * (h - 30);
+  let out = '';
+  data.closeness.forEach((c, i) => { if (c < 0.05) out += `<rect x="${x(i)}" y="8" width="${Math.max(1, (w - pad) / n)}" height="${h - 26}" fill="var(--contact)"/>`; });
+  out += `<text x="2" y="${y(max) + 4}">${cm(max)}</text><text x="2" y="${y(0)}">0</text>`;
+  let lx = pad;
+  for (const [part, color] of Object.entries(PARTS)) {
+    let pts = '', path = '';
+    d.error[part].forEach((v, i) => { if (v == null) { if (pts) path += `<polyline fill="none" stroke="${color}" stroke-width="1.2" points="${pts}"/>`; pts = ''; }
+      else pts += `${x(i).toFixed(1)},${y(v).toFixed(1)} `; });
+    if (pts) path += `<polyline fill="none" stroke="${color}" stroke-width="1.2" points="${pts}"/>`;
+    out += path + `<text x="${lx}" y="${h - 3}" style="fill:${color}">${part}</text>`; lx += 80;
+  }
+  out += `<line id="playhead" x1="${pad}" x2="${pad}" y1="8" y2="${h - 18}" stroke="#fff8"/>`;
+  svg.innerHTML = out;
+  svg.onclick = e => { const r = svg.getBoundingClientRect();
+    const i = Math.round((e.clientX - r.left - pad) / (w - pad - 10) * (n - 1));
+    $('video').currentTime = data.frames[Math.max(0, Math.min(n - 1, i))] / data.fps; draw(); };
+  movePlayhead(frameAt($('video').currentTime));
+}
+
+function movePlayhead(i) {
+  const line = $('playhead'), svg = $('chart'); if (!line || !data) return;
+  const w = svg.clientWidth || 800, px = 30 + i / Math.max(1, data.frames.length - 1) * (w - 40);
+  line.setAttribute('x1', px); line.setAttribute('x2', px);
+}
+
+let dragX = null;
+$('canvas').onpointerdown = e => { dragX = e.clientX; e.target.setPointerCapture(e.pointerId); };
+$('canvas').onpointermove = e => { if (dragX == null) return; yaw += (e.clientX - dragX) * 0.01; dragX = e.clientX; draw(); };
+$('canvas').onpointerup = () => { dragX = null; };
+const tick = () => { if (!$('video').paused) draw(); requestAnimationFrame(tick); };
+requestAnimationFrame(tick);
+$('video').onseeked = draw; $('video').onloadeddata = draw;
+window.onresize = () => { draw(); drawChart(); };
+$('filter').oninput = renderList;
+init();
+</script>
+</body>
+</html>
