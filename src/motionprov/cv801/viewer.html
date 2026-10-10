@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CV801 Stand</title>
+<style>
+  :root { --bg:#0e1322; --panel:#151b2d; --line:#26304a; --text:#e5e9fb; --muted:#8a94b0;
+          --good:#5fd39a; --bad:#ff7a7a; --accent:#8ccaff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 system-ui, sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); }
+  h1 { margin:0 0 8px; font-size:17px; }
+  table { border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { padding:3px 10px; border-bottom:1px solid var(--line); text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  .layout { display:grid; grid-template-columns:270px 1fr; height:calc(100vh - 150px); }
+  aside { border-right:1px solid var(--line); overflow:auto; }
+  aside input { width:calc(100% - 16px); margin:8px; padding:6px; background:var(--panel);
+                color:var(--text); border:1px solid var(--line); border-radius:4px; }
+  .take { padding:6px 10px; cursor:pointer; border-bottom:1px solid var(--line); }
+  .take:hover, .take.active { background:var(--panel); }
+  .take small { color:var(--muted); display:block; }
+  main { overflow:auto; padding:12px 16px; }
+  .tabs button { background:var(--panel); color:var(--text); border:1px solid var(--line);
+                 padding:4px 12px; border-radius:4px; cursor:pointer; }
+  .tabs button.on { border-color:var(--accent); color:var(--accent); }
+  .row { display:grid; grid-template-columns:1.2fr 1fr 1fr; gap:12px; margin-top:10px; }
+  video { width:100%; border-radius:6px; background:#000; }
+  .pose-player { background:var(--panel); border-radius:6px; padding:6px; }
+  .pose-heading { font-weight:600; margin-bottom:4px; }
+  .pose-stage { height:260px; }
+  .pose-stage canvas { width:100%; height:100%; }
+  .pose-controls { display:flex; gap:6px; align-items:center; margin-top:4px; font-size:12px; }
+  .pose-seek { flex:1; }
+  .pose-status { color:var(--muted); font-size:12px; margin:4px 0 0; }
+  .panel { background:var(--panel); border-radius:6px; padding:10px; margin-top:12px; }
+  .panel h3 { margin:0 0 6px; font-size:14px; }
+  .hits { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .hit { cursor:pointer; padding:2px 0; }
+  .hit.ok::before { content:"✓ "; color:var(--good); }
+  .hit.no::before { content:"✗ "; color:var(--bad); }
+  .hit.src { font-weight:600; }
+  .variants { margin-top:6px; }
+  .variants button { font-size:12px; }
+  #srcVideo { margin-top:6px; width:60%; opacity:.9; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; background:#26304a; margin-left:6px; }
+  .stats td { padding:2px 10px; }
+  .muted { color:var(--muted); }
+  svg text { fill:var(--muted); font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Motion fingerprinting from video · reference vs CoMotion skeletons, occlusion and generated copies (AIST++ confirmation split)</h1>
+  <div id="summary" class="muted">Loading summary…</div>
+  <div id="provSummary" class="muted"></div>
+</header>
+<div class="layout">
+  <aside><input id="filter" placeholder="Filter takes (e.g. gBR, ch03)"><div id="takes"></div></aside>
+  <main>
+    <div id="title" class="muted">Pick a take on the left.</div>
+    <div class="tabs" id="tabs"></div>
+    <div class="tabs variants" id="variants"></div>
+    <div class="row">
+      <div><video id="video" controls muted playsinline></video>
+        <div id="srcCaption" class="muted"></div><video id="srcVideo" muted playsinline hidden></video></div>
+      <div id="refHost"></div>
+      <div id="estHost"></div>
+    </div>
+    <div class="panel"><h3>CoMotion error vs reference, by body part (Procrustes-aligned, metres)</h3>
+      <svg id="chart" width="100%" height="170"></svg></div>
+    <div class="panel"><h3>Top-5 retrieval by choreography (kNN on pose statistics; same take excluded)</h3>
+      <div class="hits"><div id="refHits"></div><div id="estHits"></div></div></div>
+    <div class="panel" id="provPanel" hidden><h3>Provenance: is the generated copy a transfer of this recording, or could it be a new performance? (score against this recording)</h3>
+      <div id="prov"></div></div>
+    <div class="panel" id="attrPanel" hidden><h3>Attribution: which real recording does this generated copy point to? (kNN, all clean views of this camera, nothing excluded)</h3>
+      <div id="attr"></div></div>
+    <div class="panel" id="plausPanel" hidden><h3>Physical plausibility of the recovered motion for this view (15 fps)</h3>
+      <div id="plaus"></div></div>
+  </main>
+</div>
+<script src="/assets/pose-player.js"></script>
+<script>
+const PARTS = {torso:'#e5e9fb', left_arm:'#ffbc8a', right_arm:'#8ccaff', left_leg:'#f3a6d8', right_leg:'#a6f3c2'};
+const CONDITIONS = ['reference', 'comotion_c01', 'comotion_c05', 'comotion_c09', 'comotion_all',
+                    'occluded_arms', 'occluded_legs', 'mimicmotion'];
+const VARIANT_LABEL = {comotion: 'clean video', occluded_arms: 'arms painted out', occluded_legs: 'legs painted out',
+                       mimicmotion: 'generated copy (MimicMotion)', wan: 'generated copy (Wan2.2-Animate, vertical, 5 s)'};
+const PLAUS_LABEL = {clean: 'clean video', occluded_arms: 'arms painted out', occluded_legs: 'legs painted out',
+                     mimicmotion: 'generated copy', wan: 'generated copy (Wan)'};
+let takes = [], players = [], current = null, errorSeries = null, currentView = null;
+const $ = id => document.getElementById(id);
+const fmt = v => v == null ? '–' : v.toFixed(3);
+
+async function json(url) { const r = await fetch(url); if (!r.ok) throw new Error(url); return r.json(); }
+
+async function init() {
+  const s = await json('/api/summary');
+  const rows = CONDITIONS.filter(c => s[c]).map(c => `<tr><td>${c}</td>` +
+    ['knn', 'dtw'].map(m => `<td>${fmt(s[c][m].mAP)}</td><td>${fmt(s[c][m]['Hit@1'])}</td>`).join('') +
+    `<td>${s[c].knn.n_queries}</td></tr>`).join('');
+  const cm = o => Object.entries(o).map(([k, v]) => `${k} ${(v * 100).toFixed(1)}`).join(' · ');
+  const parts = `clean ${cm(s.pose_error_by_part)}` + Object.entries(s.pose_error_by_part_extra || {})
+    .map(([n, o]) => `<br>${n}: ${cm(o)}`).join('');
+  $('summary').innerHTML = `<table><tr><th>pose source</th><th>kNN mAP</th><th>kNN Hit@1</th>` +
+    `<th>DTW mAP</th><th>DTW Hit@1</th><th>queries</th></tr>${rows}</table>` +
+    `<div class="muted">mean CoMotion PA error vs reference by part (cm): ${parts}</div>`;
+  const prov = await json('/api/provenance').catch(() => ({}));
+  $('provSummary').innerHTML = Object.entries(prov).map(([g, ms]) => `<b>provenance, ${g}</b>: ` +
+    Object.entries(ms).map(([m, r]) => `${m} AUC copy vs re-performance <b>${r.auc_copy_vs_reperformance.toFixed(3)}</b>, ` +
+      `copy above every re-performance in ${(r.copy_above_all_rate * 100).toFixed(0)}% of ${r.sources_with_reperformance} sources`).join(' · ')).join('<br>');
+  takes = await json('/api/takes');
+  renderTakes();
+}
+
+function renderTakes() {
+  const q = $('filter').value.toLowerCase();
+  $('takes').innerHTML = takes.filter(t => t.take.toLowerCase().includes(q)).map(t =>
+    `<div class="take ${current?.take === t.take ? 'active' : ''}" data-take="${t.take}">${t.take}` +
+    `<small>${t.label} · ${t.views.length} views · margin ${fmt(t.margin)}</small></div>`).join('');
+  for (const el of document.querySelectorAll('.take')) el.onclick = () => selectTake(el.dataset.take);
+}
+
+function selectTake(take, view) {
+  current = takes.find(t => t.take === take); renderTakes();
+  $('title').textContent = `${current.take} · choreography ${current.label}`;
+  $('tabs').innerHTML = current.views.map(v => `<button data-view="${v}">${v.match(/_c(\d\d)_/)[0].slice(1, 4)}</button>`).join('')
+    || '<span class="muted">No CoMotion views for this take yet.</span>';
+  for (const b of document.querySelectorAll('#tabs button')) b.onclick = () => selectView(b.dataset.view);
+  if (current.views.length) selectView(view && current.views.includes(view) ? view : current.views[0]);
+}
+
+async function selectView(view, variant = 'comotion') {
+  currentView = view;
+  for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('on', b.dataset.view === view);
+  const available = ['comotion', ...(current.variants[view] || [])];
+  $('variants').innerHTML = available.length > 1 ? available.map(v =>
+    `<button data-variant="${v}" class="${v === variant ? 'on' : ''}">${VARIANT_LABEL[v] || v}</button>`).join(' ') : '';
+  for (const b of document.querySelectorAll('#variants button')) b.onclick = () => selectView(view, b.dataset.variant);
+  players.forEach(p => p.dispose()); $('refHost').innerHTML = ''; $('estHost').innerHTML = '';
+  const video = $('video'); video.src = `/video/${variant}/${view}.mp4`;
+  const src = $('srcVideo'); src.hidden = variant === 'comotion';
+  $('srcCaption').textContent = variant === 'comotion' ? '' : 'source recording (clean), kept in sync:';
+  if (!src.hidden) { src.src = `/video/comotion/${view}.mp4`; }
+  video.onplay = () => { if (!src.hidden) src.play(); }; video.onpause = () => src.pause();
+  video.onseeked = () => { if (!src.hidden) src.currentTime = video.currentTime; };
+  players = [new PosePlayer($('refHost'), `/api/pose/reference/${current.take}`, {label: 'Reference (AIST++ fit)', video}),
+             new PosePlayer($('estHost'), `/api/pose/${variant}/${view}`, {label: `CoMotion on ${VARIANT_LABEL[variant]}`, video})];
+  errorSeries = await json(`/api/errors/${variant}/${view}`).catch(() => null);
+  drawChart();
+  const cam = view.match(/_(c\d\d)_/)[1];
+  const condition = variant === 'comotion' ? 'comotion_' + cam : variant;
+  await renderHits('refHits', 'Reference skeletons', 'reference', current.take);
+  await renderHits('estHits', `CoMotion skeletons (${cam}, ${VARIANT_LABEL[variant]})`, condition, view);
+  await renderProvenance(view);
+  await renderAttribution(view, variant);
+  await renderPlausibility(view);
+}
+
+async function renderProvenance(view) {
+  const data = await json(`/api/provenance/${view}`).catch(() => ({}));
+  const blocks = [];
+  for (const [gen, methods] of Object.entries(data)) for (const [method, row] of Object.entries(methods)) {
+    const others = Object.entries(row.reperformances);
+    const vals = [row.copy, ...others.map(([, v]) => v)];
+    const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+    const w = 640, h = 46, x = v => 12 + (v - lo) / span * (w - 24);
+    const dots = others.map(([id, v]) => `<circle cx="${x(v).toFixed(1)}" cy="24" r="5" fill="#8a94b0" opacity=".8"><title>${id} (re-performance) ${v.toFixed(4)}</title></circle>`).join('');
+    const copy = `<path d="M${x(row.copy).toFixed(1)},14 l8,10 l-8,10 l-8,-10z" fill="var(--bad)"><title>generated copy ${row.copy.toFixed(4)}</title></path>`;
+    blocks.push(`<div style="margin:6px 0"><b>${VARIANT_LABEL[gen] || gen} · ${method}</b> <span class="badge" style="color:${row.copy_above_all ? 'var(--bad)' : 'var(--good)'}">` +
+      `${row.copy_above_all ? 'copy scores above all ' + others.length + ' re-performances → flagged as transfer' : 'copy within re-performances → not flagged'}</span>` +
+      `<svg width="${w}" height="${h}"><line x1="12" x2="${w - 12}" y1="24" y2="24" stroke="#26304a"/>${dots}${copy}` +
+      `<text x="12" y="44">${lo.toFixed(4)}</text><text x="${w - 70}" y="44">${hi.toFixed(4)}</text></svg>` +
+      `<div class="muted">grey: other takes of this choreography (real people re-performing it) · red: generated copy driven by this recording · higher = closer</div></div>`);
+  }
+  $('provPanel').hidden = !blocks.length; $('prov').innerHTML = blocks.join('');
+}
+
+async function renderAttribution(view, variant) {
+  const row = ['mimicmotion', 'wan'].includes(variant) ? await json(`/api/attribution/${view}`).catch(() => null) : null;
+  $('attrPanel').hidden = !row; if (!row) return;
+  const rank = row.source_rank;
+  $('attr').innerHTML = `Source recording ranks <span class="badge" style="color:${rank === 1 ? 'var(--good)' : 'var(--bad)'}">#${rank} of ${row.gallery}</span>` +
+    row.top.map((h, i) => { const same = h.id === view; const t = takes.find(x => x.take === h.id.replace(/_c\d\d_/, '_cAll_'));
+      return `<div class="hit ${t && t.label === current.label ? 'ok' : 'no'} ${same ? 'src' : ''}" data-take="${t ? t.take : ''}" data-view="${h.id}">` +
+        `${i + 1}. ${h.id} <span class="muted">${t ? t.label : ''} · ${h.score.toFixed(4)}${same ? ' · the source' : ''}</span></div>`; }).join('');
+  for (const el of $('attr').querySelectorAll('.hit')) el.onclick = () => selectTake(el.dataset.take, el.dataset.view);
+}
+
+async function renderPlausibility(view) {
+  const rows = await json(`/api/plausibility/${view}`).catch(() => ({}));
+  const names = Object.keys(rows); $('plausPanel').hidden = !names.length; if (!names.length) return;
+  $('plaus').innerHTML = `<table class="stats"><tr><th>video</th><th>jerk (m/s³)</th><th>foot skate (m/s)</th><th>frames</th></tr>` +
+    names.map(n => `<tr><td>${PLAUS_LABEL[n] || n}</td><td>${rows[n].jerk == null ? '–' : rows[n].jerk.toFixed(0)}</td>` +
+      `<td>${rows[n].foot_skate == null ? '–' : rows[n].foot_skate.toFixed(2)}</td><td>${rows[n].frames}</td></tr>`).join('') +
+    `</table><div class="muted">Across all 78 views these separate real from generated only weakly (AUC 0.53–0.55).</div>`;
+}
+
+async function renderHits(host, title, condition, id) {
+  const row = await json(`/api/query/${condition}/knn/${id}`).catch(() => null);
+  if (!row) { $(host).innerHTML = `<b>${title}</b><div class="muted">not evaluated</div>`; return; }
+  const label = id => id.replace(/_c(\d\d|All)_/, '_cAll_');
+  const items = row.top.map(h => {
+    const t = takes.find(x => x.take === label(h.id));
+    const ok = t && t.label === row.label;
+    return `<div class="hit ${ok ? 'ok' : 'no'}" data-take="${label(h.id)}" data-view="${h.id}">` +
+      `${h.id} <span class="muted">${t ? t.label : ''} · ${h.score.toFixed(4)}</span></div>`;
+  }).join('');
+  $(host).innerHTML = `<b>${title}</b> <span class="muted">margin ${fmt(row.margin)}</span>${items}`;
+  for (const el of $(host).querySelectorAll('.hit')) el.onclick = () => selectTake(el.dataset.take, el.dataset.view);
+}
+
+function drawChart() {
+  const svg = $('chart'); svg.innerHTML = '';
+  if (!errorSeries) { svg.innerHTML = '<text x="10" y="20">No error series.</text>'; return; }
+  const w = svg.clientWidth || 800, h = 170, pad = 28, frames = errorSeries.frames;
+  const max = Math.max(.05, ...Object.values(errorSeries.series).flat());
+  const x = f => pad + (f - frames[0]) / Math.max(1, frames.at(-1) - frames[0]) * (w - pad - 10);
+  const y = v => h - 18 - v / max * (h - 30);
+  let out = `<text x="2" y="${y(max) + 4}">${max.toFixed(2)}</text><text x="2" y="${y(0)}">0</text>`;
+  let lx = pad;
+  for (const [part, color] of Object.entries(PARTS)) {
+    const pts = errorSeries.series[part].map((v, i) => `${x(frames[i]).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+    out += `<polyline fill="none" stroke="${color}" stroke-width="1.3" points="${pts}"/>`;
+    out += `<text x="${lx}" y="${h - 3}" style="fill:${color}">${part}</text>`; lx += 80;
+  }
+  out += `<line id="playhead" x1="${pad}" x2="${pad}" y1="8" y2="${h - 18}" stroke="#fff6" />`;
+  svg.innerHTML = out;
+  svg.onclick = e => { const r = svg.getBoundingClientRect();
+    const f = frames[0] + (e.clientX - r.left - pad) / (w - pad - 10) * (frames.at(-1) - frames[0]);
+    $('video').currentTime = Math.max(0, f / 30); };
+  $('video').ontimeupdate = () => { const src = $('srcVideo');
+    if (!src.hidden && Math.abs(src.currentTime - $('video').currentTime) > 0.15) src.currentTime = $('video').currentTime;
+    const line = $('playhead'); if (line) {
+    const px = x($('video').currentTime * 30); line.setAttribute('x1', px); line.setAttribute('x2', px); } };
+}
+
+$('filter').oninput = renderTakes;
+init();
+</script>
+</body>
+</html>
