@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+*.pt
+*.ckpt
+*.pth
+*.pkl
+*.npz
+*.npy
+data/
+checkpoints/
+pretrained/
+out/
+.DS_Store
