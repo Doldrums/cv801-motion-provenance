@@ -20,11 +20,3 @@ The project builds a fingerprint of a motion from a skeleton, and uses it for tw
 ## Not included
 
 Datasets (AIST++, NTU RGB+D, the social media dataset), pose caches, model checkpoints and the pose model assets are not in this repository, and the code does not run without them. This is a snapshot of one part of the work, not a complete release.
-
-## Main results (AIST++, 3 training runs unless noted)
-
-- Pose error: 4.0 cm torso, 5.4 legs, 5.8 arms; 7.5 hidden legs, 10.8 hidden arms.
-- Replacing one arm: the correct take stays on top for 0.99 of queries unedited, 0.30 (kNN) and 0.73 (DTW) after replacing the left arm.
-- Trained model alone: mAP 0.59. DTW + kNN: 0.70. DTW + kNN + trained model: 0.77.
-- AI-generated video: AUC 0.53 to 0.76 without a library of real clips, 0.96 to 0.997 for copies with a library.
-- Conformal threshold: 4.5 to 4.8 % false alarms at a 5 % target, about 89 % of copies caught.
